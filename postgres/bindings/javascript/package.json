@@ -1,0 +1,55 @@
+{
+  "name": "pg-micro",
+  "version": "0.0.5",
+  "description": "pgmicro — a PostgreSQL-compatible embeddable database",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glommer/pgmicro"
+  },
+  "license": "MIT",
+  "module": "./dist/promise.js",
+  "main": "./dist/promise.js",
+  "type": "module",
+  "exports": {
+    ".": "./dist/promise.js",
+    "./compat": "./dist/compat.js"
+  },
+  "bin": {
+    "pg-micro": "./cli.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "dist/**"
+  ],
+  "scripts": {
+    "napi-build": "npx napi build --platform --esm --manifest-path ../../../bindings/javascript/Cargo.toml --output-dir . && python3 ./rename-node.py .",
+    "tsc-build": "npx tsc",
+    "build": "npm run napi-build && npm run tsc-build",
+    "test": "vitest --run",
+    "prepack": "cp ../../../README.md . 2>/dev/null || true"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@tursodatabase/database-common": "^0.6.0-pre.7"
+  },
+  "optionalDependencies": {
+    "pg-micro-darwin-arm64": "0.0.5",
+    "pg-micro-linux-x64-gnu": "0.0.5",
+    "pg-micro-linux-arm64-gnu": "0.0.5"
+  },
+  "napi": {
+    "binaryName": "pgmicro",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "imports": {
+    "#index": "./index.js"
+  }
+}

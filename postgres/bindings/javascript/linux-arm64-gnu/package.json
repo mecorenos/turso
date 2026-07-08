@@ -1,0 +1,17 @@
+{
+  "name": "pg-micro-linux-arm64-gnu",
+  "version": "0.0.5",
+  "description": "pgmicro native binaries for Linux arm64 (glibc)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glommer/pgmicro"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "main": "pgmicro.linux-arm64-gnu.node",
+  "files": [
+    "pgmicro.linux-arm64-gnu.node",
+    "pgmicro"
+  ]
+}

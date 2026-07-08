@@ -6849,6 +6849,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "turso_frontend_pg"
+version = "0.7.0-pre.18"
+dependencies = [
+ "chrono",
+ "parking_lot",
+ "rustc-hash 2.1.1",
+ "tempfile",
+ "turso_core",
+ "turso_ext",
+ "turso_parser",
+ "turso_parser_pg",
+]
+
+[[package]]
 name = "turso_macros"
 version = "0.7.0-pre.18"
 dependencies = [
@@ -6898,6 +6912,38 @@ dependencies = [
  "pg_query",
  "thiserror 2.0.16",
  "turso_parser",
+]
+
+[[package]]
+name = "turso_postgres_tests"
+version = "0.7.0-pre.18"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "ctor 0.5.0",
+ "env_logger",
+ "log",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "rusqlite",
+ "serial_test",
+ "similar-asserts",
+ "sql_generation",
+ "tempfile",
+ "test-log",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "turso",
+ "turso-dbhash",
+ "turso_core",
+ "turso_ext",
+ "turso_frontend_pg",
+ "turso_macros",
+ "turso_parser",
+ "turso_sdk_kit",
+ "twox-hash",
+ "zerocopy 0.8.26",
 ]
 
 [[package]]

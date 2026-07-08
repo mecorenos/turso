@@ -110,7 +110,6 @@ use crate::{
     },
     translate::{emitter::TransactionMode, pragma::TURSO_CDC_DEFAULT_TABLE_NAME},
     vdbe::metrics::ConnectionMetrics,
-    vtab::VirtualTable,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use core::str;
@@ -183,7 +182,7 @@ pub use vdbe::{
     builder::QueryMode, explain::EXPLAIN_COLUMNS, explain::EXPLAIN_QUERY_PLAN_COLUMNS,
     FromValueRow, PrepareContext, PreparedProgram, Program, Register,
 };
-pub use vtab::{InternalVirtualTable, InternalVirtualTableCursor};
+pub use vtab::{InternalVirtualTable, InternalVirtualTableCursor, VirtualTable};
 
 /// Database index for the main database (always 0 in SQLite).
 pub const MAIN_DB_ID: usize = 0;
@@ -2869,6 +2868,12 @@ impl Database {
         T: InternalVirtualTable + 'static,
     {
         self.with_schema_mut(|schema| schema.register_internal_vtab(table))
+    }
+
+    pub fn register_virtual_table(&self, table: Arc<VirtualTable>) -> Result<String> {
+        let name = table.name.clone();
+        self.with_schema_mut(|schema| schema.add_virtual_table(table))?;
+        Ok(name)
     }
     pub(crate) fn clone_schema(&self) -> Arc<Schema> {
         let schema = self.schema.lock();

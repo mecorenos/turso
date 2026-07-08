@@ -30,6 +30,22 @@ pub struct VirtualTable {
 }
 
 impl VirtualTable {
+    pub fn new_internal(
+        name: String,
+        sql: String,
+        kind: VTabKind,
+        table: Arc<RwLock<dyn InternalVirtualTable>>,
+    ) -> crate::Result<Self> {
+        Ok(VirtualTable {
+            name,
+            columns: Self::resolve_columns(sql)?,
+            kind,
+            vtab_type: VirtualTableType::Internal(table),
+            vtab_id: 0,
+            innocuous: true,
+        })
+    }
+
     pub(crate) fn id(&self) -> u64 {
         self.vtab_id
     }

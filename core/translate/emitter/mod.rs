@@ -164,6 +164,9 @@ pub struct Resolver<'a> {
     /// Controls whether unresolved double-quoted identifiers fall back to string
     /// literals (SQLite's DQS misfeature) in DML statements.
     pub dqs_dml: DoubleQuotedDml,
+    /// Schema dialect of the database being compiled against; consulted for
+    /// dialect-provided scalar functions after built-ins and extensions.
+    schema_dialect: Arc<dyn crate::dialect::SchemaDialect>,
     /// When set, we are compiling a trigger subprogram for this database.
     /// Ordinary triggers are restricted to their own database, but temp-backed
     /// triggers follow SQLite's looser resolution rules and may access objects
@@ -276,6 +279,7 @@ impl<'a> Resolver<'a> {
         symbol_table: &'a SymbolTable,
         enable_custom_types: bool,
         dqs_dml: DoubleQuotedDml,
+        schema_dialect: Arc<dyn crate::dialect::SchemaDialect>,
     ) -> Self {
         let has_temp_schema = temp_database.read().is_some();
         Self {
@@ -292,6 +296,7 @@ impl<'a> Resolver<'a> {
             self_table_scope: RefCell::new(None),
             enable_custom_types,
             dqs_dml,
+            schema_dialect,
             trigger_context: None,
             has_temp_schema,
             fk_action_compile_stack: FkActionCompileStack::default(),
@@ -321,6 +326,7 @@ impl<'a> Resolver<'a> {
             self_table_scope: RefCell::new(self.self_table_scope.borrow().clone()),
             enable_custom_types: self.enable_custom_types,
             dqs_dml: self.dqs_dml,
+            schema_dialect: self.schema_dialect.clone(),
             trigger_context: self.trigger_context.clone(),
             has_temp_schema: self.has_temp_schema,
             fk_action_compile_stack: self.fk_action_compile_stack.clone(),
@@ -342,6 +348,7 @@ impl<'a> Resolver<'a> {
             self_table_scope: RefCell::new(self.self_table_scope.borrow().clone()),
             enable_custom_types: self.enable_custom_types,
             dqs_dml: self.dqs_dml,
+            schema_dialect: self.schema_dialect.clone(),
             trigger_context: self.trigger_context.clone(),
             has_temp_schema: self.has_temp_schema,
             fk_action_compile_stack: self.fk_action_compile_stack.clone(),
@@ -467,10 +474,15 @@ impl<'a> Resolver<'a> {
     ) -> Result<Option<Func>, LimboError> {
         match Func::resolve_function(func_name, arg_count)? {
             Some(func) => Ok(Some(func)),
-            None => Ok(self
-                .symbol_table
-                .resolve_function(func_name, arg_count)
-                .map(Func::External)),
+            None => {
+                if let Some(f) = self.symbol_table.resolve_function(func_name, arg_count) {
+                    return Ok(Some(Func::External(f)));
+                }
+                Ok(self
+                    .schema_dialect
+                    .resolve_function(func_name, arg_count)
+                    .then(|| Func::Dialect(func_name.to_string())))
+            }
         }
     }
 

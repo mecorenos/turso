@@ -1057,6 +1057,9 @@ impl Display for ScalarFunc {
             Self::Attach => "attach",
             Self::Detach => "detach",
             Self::Unlikely => "unlikely",
+            Self::NextVal => "nextval",
+            Self::CurrVal => "currval",
+            Self::SetVal => "setval",
             Self::StatInit => "stat_init",
             Self::StatPush => "stat_push",
             Self::StatGet => "stat_get",
@@ -1110,9 +1113,6 @@ impl Display for ScalarFunc {
             Self::UnionValueFunc => "union_value",
             Self::UnionTagFunc => "union_tag",
             Self::UnionExtractFunc => "union_extract",
-            Self::NextVal => "nextval",
-            Self::CurrVal => "currval",
-            Self::SetVal => "setval",
         };
         write!(f, "{str}")
     }
@@ -1435,6 +1435,10 @@ pub enum Func {
     Json(JsonFunc),
     AlterTable(AlterTableFunc),
     External(Arc<ExternalFunc>),
+    /// Scalar function provided by the database's schema dialect
+    /// (e.g. the PostgreSQL catalog functions). Resolved and executed
+    /// through [`crate::dialect::SchemaDialect`]; core only carries the name.
+    Dialect(String),
 }
 
 impl Display for Func {
@@ -1451,6 +1455,7 @@ impl Display for Func {
             Self::Json(json_func) => write!(f, "{json_func}"),
             Self::External(generic_func) => write!(f, "{generic_func}"),
             Self::AlterTable(alter_func) => write!(f, "{alter_func}"),
+            Self::Dialect(name) => write!(f, "{name}"),
         }
     }
 }
@@ -1475,6 +1480,7 @@ impl Deterministic for Func {
             Self::Json(json_func) => json_func.is_deterministic(),
             Self::External(external_func) => external_func.is_deterministic(),
             Self::AlterTable(_) => true,
+            Self::Dialect(_) => true,
         }
     }
 }
@@ -1558,7 +1564,6 @@ impl Func {
             }
             "group_concat" => {
                 if arg_count != 1 && arg_count != 2 {
-                    println!("{arg_count}");
                     crate::bail_parse_error!("wrong number of arguments to function {}()", name)
                 }
                 Ok(Some(Self::Agg(AggFunc::GroupConcat)))

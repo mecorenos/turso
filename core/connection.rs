@@ -27,8 +27,8 @@ use crate::{
     BusyHandlerCallback, CaptureDataChangesInfo, CheckpointMode, CheckpointResult, CipherMode, Cmd,
     Completion, ConnectionMetrics, Database, DatabaseCatalog, DatabaseOpts, Duration,
     EncryptionKey, EncryptionOpts, IOResult, IndexMethod, LimboError, MvStore, OpenFlags, PageSize,
-    Pager, Parser, Program, QueryMode, QueryRunner, Result, Schema, Statement, SyncMode,
-    TransactionMode, Trigger, Value, VirtualTable, WalAutoActions,
+    Pager, Parser, Program, QueryMode, QueryRunner, Result, Schema, SchemaDialect, Statement,
+    SyncMode, TransactionMode, Trigger, Value, VirtualTable, WalAutoActions,
 };
 use crate::{is_memory_like, turso_assert};
 use crate::{MAIN_DB_ID, TEMP_DB_ID};
@@ -1413,6 +1413,7 @@ impl Connection {
                         &mut inner.fresh,
                         &self.syms.read(),
                         &attached_resolver,
+                        self.db.schema_dialect().as_ref(),
                     ));
 
                     // Rehydrate built-in table-valued functions captured at init.
@@ -1705,6 +1706,9 @@ impl Connection {
             return Err(LimboError::InternalError("Connection closed".to_string()));
         }
         let sql = sql.as_ref();
+        self.maybe_update_schema();
+
+        // SQLite path: loop to handle multiple semicolon-separated statements
         let mut parser = Parser::new(sql.as_bytes());
         while let Some(cmd) = parser.next_cmd()? {
             let byte_offset_end = parser.offset();
@@ -2680,6 +2684,7 @@ impl Connection {
                     .get_database_by_name(&crate::util::normalize_ident(name))
                     .map(|(idx, _)| idx)
             };
+            let dialect = self.db.schema_dialect();
             for (ty, name, table_name, root_page, sql) in &rows_data {
                 match schema.handle_schema_row(
                     ty,
@@ -2694,6 +2699,7 @@ impl Connection {
                     &mut dbsp_state_index_roots,
                     &mut materialized_view_info,
                     &attached_resolver,
+                    dialect.as_ref(),
                 ) {
                     Ok(()) => {}
                     Err(LimboError::ParseError(msg)) if msg.contains("already exists") => {}
@@ -2751,6 +2757,10 @@ impl Connection {
         stmt.run_collect_rows()
     }
 
+    pub fn install_schema_dialect(&self, dialect: Arc<dyn SchemaDialect>) {
+        self.db.set_schema_dialect(dialect);
+    }
+
     pub fn register_internal_vtab<T>(&self, table: T) -> Result<String>
     where
         T: crate::vtab::InternalVirtualTable + 'static,
@@ -2779,6 +2789,10 @@ impl Connection {
             .keys()
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn schema_dialect(&self) -> Arc<dyn SchemaDialect> {
+        self.db.schema_dialect()
     }
 
     pub fn experimental_views_enabled(&self) -> bool {

@@ -1090,7 +1090,6 @@ fn parse_table(
         return Ok(());
     }
 
-    // Resolve table using connection's with_schema method
     let table = resolver.with_schema(database_id, |schema| schema.get_table(table_name.as_str()));
 
     if let Some(table) = table {
@@ -1392,6 +1391,7 @@ pub fn parse_from(
             {
                 crate::bail_parse_error!("duplicate WITH table name: {}", cte.tbl_name.as_str());
             }
+
             // Collect table names referenced in this CTE's FROM clause.
             let mut referenced_tables = Vec::new();
             collect_from_clause_table_refs(&cte.select, &mut referenced_tables);

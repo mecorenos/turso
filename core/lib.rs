@@ -48,7 +48,7 @@ pub(crate) mod thread;
 
 mod assert;
 mod connection;
-mod dialect;
+pub mod dialect;
 mod error;
 mod ext;
 mod fast_lock;
@@ -135,8 +135,10 @@ use turso_parser::{ast, ast::Cmd, parser::Parser};
 
 pub use connection::{resolve_ext_path, Connection, Row, StepResult, SymbolTable};
 pub(crate) use connection::{AtomicTransactionState, TransactionState};
+pub use dialect::{SQLiteSchemaDialect, SchemaDialect};
 pub use error::{io_error, CompletionError, LimboError};
 pub use function::ContextCollationFunction;
+pub use function::Func;
 #[cfg(feature = "io_memory_yield")]
 pub use io::MemoryYieldIO;
 #[cfg(all(feature = "fs", target_family = "unix", not(miri)))]
@@ -615,6 +617,10 @@ pub struct Database<A: alloc::ConcurrentAllocator = alloc::DynAllocator> {
     // Use parking lot RwLock here and not `crate::sync::RwLock` because it relies on `data_ptr` and that is experimental
     // in std.
     builtin_syms: parking_lot::RwLock<SymbolTable>,
+    /// Schema dialect used to interpret and format `sqlite_schema` SQL rows.
+    /// Always present; defaults to [`SQLiteSchemaDialect`]. Shared by all
+    /// connections because the parsed [`Schema`] is shared per database.
+    schema_dialect: RwLock<Arc<dyn SchemaDialect>>,
     opts: DatabaseOpts,
     n_connections: AtomicUsize,
 
@@ -744,6 +750,7 @@ impl Database {
             shared_wal_coordination: OnceLock::new(),
             db_file,
             builtin_syms: parking_lot::RwLock::new(syms),
+            schema_dialect: RwLock::new(Arc::new(SQLiteSchemaDialect) as Arc<dyn SchemaDialect>),
             io: io.clone(),
             open_flags: flags,
             init_lock: Arc::new(Mutex::new(())),
@@ -1491,6 +1498,7 @@ impl Database {
                         None,
                         pager,
                         &syms,
+                        conn.schema_dialect().as_ref(),
                     );
 
                     match result {
@@ -2875,6 +2883,18 @@ impl Database {
         self.with_schema_mut(|schema| schema.add_virtual_table(table))?;
         Ok(name)
     }
+
+    /// Replace the schema dialect used to interpret `sqlite_schema` rows.
+    ///
+    /// Call before opening connections (or at least before any schema load),
+    /// so every connection parses the shared schema with the same dialect.
+    pub fn set_schema_dialect(&self, dialect: Arc<dyn SchemaDialect>) {
+        *self.schema_dialect.write() = dialect;
+    }
+
+    pub fn schema_dialect(&self) -> Arc<dyn SchemaDialect> {
+        self.schema_dialect.read().clone()
+    }
     pub(crate) fn clone_schema(&self) -> Arc<Schema> {
         let schema = self.schema.lock();
         schema.clone()
@@ -2911,7 +2931,7 @@ impl Database {
     }
 
     pub fn experimental_custom_types_enabled(&self) -> bool {
-        self.opts.enable_custom_types
+        self.opts.enable_custom_types || self.schema_dialect().force_custom_types()
     }
 
     pub fn experimental_encryption_enabled(&self) -> bool {

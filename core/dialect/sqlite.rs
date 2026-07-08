@@ -1,15 +1,51 @@
-//! Built-in SQLite-style catalog tables.
-//!
-//! `pragma_*` table-valued functions, `json_each`/`json_tree`,
-//! `sqlite_dbpage`, `btree_dump`, and `sqlite_turso_types`. Registered into
-//! every fresh schema by [`crate::schema::Schema::with_options`] through
-//! [`register_builtin_catalog`].
-
-use crate::pragma::PragmaVirtualTable;
-use crate::schema::{Schema, Table};
-use crate::sync::Arc;
-use crate::vtab::{VirtualTable, VirtualTableType};
+use crate::{
+    pragma::PragmaVirtualTable,
+    schema::{Schema, Table},
+    sync::Arc,
+    vtab::{VirtualTable, VirtualTableType},
+};
 use turso_ext::VTabKind;
+
+/// SQLite schema dialect.
+pub struct SQLiteSchemaDialect;
+
+impl super::SchemaDialect for SQLiteSchemaDialect {
+    fn parse_sql(&self, sql: &str, root_page: i64) -> crate::Result<crate::schema::BTreeTable> {
+        crate::schema::BTreeTable::from_sql(sql, root_page)
+    }
+
+    fn to_sql(
+        &self,
+        _input: &str,
+        tbl_name: &turso_parser::ast::QualifiedName,
+        body: &turso_parser::ast::CreateTableBody,
+    ) -> crate::Result<String> {
+        Ok(format!(
+            "CREATE TABLE {} {}",
+            tbl_name.name.as_ident(),
+            body
+        ))
+    }
+
+    fn force_custom_types(&self) -> bool {
+        false
+    }
+
+    fn resolve_function(&self, _name: &str, _arg_count: usize) -> bool {
+        false
+    }
+
+    fn scalar_function(
+        &self,
+        _conn: &crate::Connection,
+        name: &str,
+        _args: &[crate::Value],
+    ) -> crate::Result<crate::Value> {
+        Err(crate::LimboError::ParseError(format!(
+            "no such function: {name}"
+        )))
+    }
+}
 
 /// Insert the standard SQLite-style catalog tables into `schema`.
 ///

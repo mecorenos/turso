@@ -204,7 +204,6 @@ macro_rules! check_arg_count {
 pub type InsnFunction =
     fn(&Program, &mut ProgramState, &Insn, &Arc<Pager>) -> Result<InsnFunctionStepResult>;
 
-/// Parse a Value (text, int, float, or blob) into a BigDecimal.
 fn value_to_bigdecimal(val: &Value) -> Result<bigdecimal::BigDecimal> {
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
@@ -621,6 +620,7 @@ pub fn op_checkpoint(
                 "Only TRUNCATE checkpoint mode is supported for MVCC".to_string(),
             ));
         }
+
         use crate::state_machine::{StateTransition, TransitionResult};
         let mut ckpt_sm = CheckpointStateMachine::new(
             pager.clone(),
@@ -647,6 +647,7 @@ pub fn op_checkpoint(
                 Err(err) => return Err(err),
             }
         };
+
         // https://sqlite.org/pragma.html#pragma_wal_checkpoint
         // 1st col: 1 (checkpoint SQLITE_BUSY) or 0 (not busy).
         state.registers[*dest].set_int(0);
@@ -7626,6 +7627,47 @@ pub fn op_function(
                     }
                 }
             }
+            ScalarFunc::Gcd => {
+                check_arg_count!(arg_count, 2);
+                let a = state.registers[*start_reg].get_value();
+                let b = state.registers[*start_reg + 1].get_value();
+                state.registers[*dest].set_value(crate::functions::math::exec_gcd(a, b)?);
+            }
+            ScalarFunc::Lcm => {
+                check_arg_count!(arg_count, 2);
+                let a = state.registers[*start_reg].get_value();
+                let b = state.registers[*start_reg + 1].get_value();
+                state.registers[*dest].set_value(crate::functions::math::exec_lcm(a, b)?);
+            }
+            ScalarFunc::Repeat => {
+                check_arg_count!(arg_count, 2);
+                let input = state.registers[*start_reg].get_value();
+                let count = state.registers[*start_reg + 1].get_value();
+                state.registers[*dest]
+                    .set_value(crate::functions::string::exec_repeat(input, count));
+            }
+            ScalarFunc::Lpad => {
+                let input = state.registers[*start_reg].get_value();
+                let length = state.registers[*start_reg + 1].get_value();
+                let fill = if arg_count >= 3 {
+                    Some(state.registers[*start_reg + 2].get_value())
+                } else {
+                    None
+                };
+                state.registers[*dest]
+                    .set_value(crate::functions::string::exec_lpad(input, length, fill));
+            }
+            ScalarFunc::Rpad => {
+                let input = state.registers[*start_reg].get_value();
+                let length = state.registers[*start_reg + 1].get_value();
+                let fill = if arg_count >= 3 {
+                    Some(state.registers[*start_reg + 2].get_value())
+                } else {
+                    None
+                };
+                state.registers[*dest]
+                    .set_value(crate::functions::string::exec_rpad(input, length, fill));
+            }
             ScalarFunc::NextVal => {
                 // The translator no longer emits `Function NextVal` — nextval
                 // is now handled entirely by the SequenceComputeNext +
@@ -8376,47 +8418,6 @@ pub fn op_function(
                 };
                 state.registers[*dest].set_value(result);
             }
-            ScalarFunc::Gcd => {
-                check_arg_count!(arg_count, 2);
-                let a = state.registers[*start_reg].get_value();
-                let b = state.registers[*start_reg + 1].get_value();
-                state.registers[*dest].set_value(crate::functions::math::exec_gcd(a, b)?);
-            }
-            ScalarFunc::Lcm => {
-                check_arg_count!(arg_count, 2);
-                let a = state.registers[*start_reg].get_value();
-                let b = state.registers[*start_reg + 1].get_value();
-                state.registers[*dest].set_value(crate::functions::math::exec_lcm(a, b)?);
-            }
-            ScalarFunc::Repeat => {
-                check_arg_count!(arg_count, 2);
-                let input = state.registers[*start_reg].get_value();
-                let count = state.registers[*start_reg + 1].get_value();
-                state.registers[*dest]
-                    .set_value(crate::functions::string::exec_repeat(input, count));
-            }
-            ScalarFunc::Lpad => {
-                let input = state.registers[*start_reg].get_value();
-                let length = state.registers[*start_reg + 1].get_value();
-                let fill = if arg_count >= 3 {
-                    Some(state.registers[*start_reg + 2].get_value())
-                } else {
-                    None
-                };
-                state.registers[*dest]
-                    .set_value(crate::functions::string::exec_lpad(input, length, fill));
-            }
-            ScalarFunc::Rpad => {
-                let input = state.registers[*start_reg].get_value();
-                let length = state.registers[*start_reg + 1].get_value();
-                let fill = if arg_count >= 3 {
-                    Some(state.registers[*start_reg + 2].get_value())
-                } else {
-                    None
-                };
-                state.registers[*dest]
-                    .set_value(crate::functions::string::exec_rpad(input, length, fill));
-            }
             ScalarFunc::BooleanToInt => {
                 check_arg_count!(arg_count, 1);
                 let val = &state.registers[*start_reg];
@@ -8861,6 +8862,18 @@ pub fn op_function(
                 ),
             },
         },
+        crate::function::Func::Dialect(name) => {
+            let args: Vec<Value> = state.registers[*start_reg..*start_reg + arg_count]
+                .iter()
+                .map(|r| r.get_value().clone())
+                .collect();
+            let result = program.connection.schema_dialect().scalar_function(
+                &program.connection,
+                name,
+                &args,
+            )?;
+            state.registers[*dest].set_value(result);
+        }
         crate::function::Func::AlterTable(alter_func) => {
             let r#type = &state.registers[*start_reg].get_value().clone();
 
@@ -12436,6 +12449,8 @@ pub fn op_parse_schema(
     } else {
         format!("SELECT * FROM {schema_table}")
     };
+    // Use prepare_internal to always use the SQLite parser for these internal queries,
+    // regardless of the user-facing SQL dialect (e.g. PostgreSQL mode).
     let mut stmt = conn.prepare_internal(sql)?;
     // ParseSchema runs as a nested helper statement inside the parent schema
     // mutation. It only reads sqlite_schema, so a statement subtransaction is
@@ -12550,6 +12565,7 @@ fn op_parse_schema_step(
                     &mut inner.dbsp_state_index_roots,
                     &mut inner.materialized_view_info,
                     &attached_resolver,
+                    conn.schema_dialect().as_ref(),
                 )?;
                 continue;
             }
@@ -12704,7 +12720,7 @@ pub fn op_init_cdc_version(
         insn
     );
 
-    let conn = program.connection.clone();
+    let conn = &program.connection;
     let escaped_cdc_table_name = escape_sql_string_literal(cdc_table_name);
 
     // First entry — handle no-op cases without spinning up the state machine,
@@ -12728,7 +12744,7 @@ pub fn op_init_cdc_version(
         }
 
         let stmt = prepare_cdc_internal(
-            &conn,
+            conn,
             format!(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='{escaped_cdc_table_name}'",
             ),
@@ -12743,7 +12759,7 @@ pub fn op_init_cdc_version(
 
     let res = drive_init_cdc_version(
         state,
-        &conn,
+        conn,
         version,
         cdc_mode,
         cdc_table_name,

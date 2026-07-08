@@ -1523,8 +1523,9 @@ impl Schema {
         mv_cursor: Option<Arc<RwLock<MvCursor>>>,
         pager: &Arc<Pager>,
         syms: &SymbolTable,
+        dialect: &dyn crate::dialect::SchemaDialect,
     ) -> Result<IOResult<()>> {
-        let result = self.make_from_btree_internal(state, mv_cursor, pager, syms);
+        let result = self.make_from_btree_internal(state, mv_cursor, pager, syms, dialect);
         if result.is_err() {
             state.cleanup(pager);
         } else if let Ok(IOResult::Done(..)) = result {
@@ -1542,6 +1543,7 @@ impl Schema {
         mv_cursor: Option<Arc<RwLock<MvCursor>>>,
         pager: &Arc<Pager>,
         syms: &SymbolTable,
+        dialect: &dyn crate::dialect::SchemaDialect,
     ) -> Result<IOResult<()>> {
         loop {
             tracing::debug!("make_from_btree: state.phase={:?}", state.phase);
@@ -1648,6 +1650,7 @@ impl Schema {
                         &mut acc.dbsp_state_index_roots,
                         &mut acc.materialized_view_info,
                         &|_| None,
+                        dialect,
                     )?;
 
                     state.phase = MakeFromBtreePhase::Advancing;
@@ -2081,119 +2084,108 @@ impl Schema {
         // `&|_| None`; unresolvable names become `Some(INVALID_DB_ID)`
         // so the trigger never fires against a real db.
         resolve_attached_db: &dyn Fn(&str) -> Option<usize>,
+        dialect: &dyn crate::dialect::SchemaDialect,
     ) -> Result<()> {
         match ty {
             "table" => {
                 let sql = maybe_sql.expect("sql should be present for table");
-                // Classify the row by parsing its schema SQL, mirroring
-                // SQLite, where sqlite3InitCallback feeds the sql column to
-                // the parser and a row becomes a virtual table purely as a
-                // byproduct of the create_vtab grammar rule.
-                match Parser::new(sql.as_bytes()).next_cmd()? {
-                    Some(Cmd::Stmt(Stmt::CreateVirtualTable(_))) => {
-                        if root_page != 0 {
-                            return Err(LimboError::Corrupt(format!(
-                                "sqlite_schema root_page must be 0 for virtual table {name}, got {root_page}"
-                            )));
-                        }
-                        // a virtual table is found in the sqlite_schema, but it's no
-                        // longer in the in-memory schema. We need to recreate it if
-                        // the module is loaded in the symbol table.
-                        let vtab = if let Some(vtab) = syms.vtabs.get(name) {
-                            vtab.clone()
-                        } else {
-                            let mod_name = module_name_from_sql(sql)?;
-                            crate::VirtualTable::table(
-                                Some(name),
-                                mod_name,
-                                module_args_from_sql(sql)?,
-                                syms,
-                            )?
-                        };
-                        self.add_virtual_table(vtab)?;
-                    }
-                    Some(Cmd::Stmt(Stmt::CreateTable { tbl_name, body, .. })) => {
-                        let table = create_table(tbl_name.name.as_str(), &body, root_page)?;
+                let sql_bytes = sql.as_bytes();
+                if root_page == 0
+                    && sql_bytes
+                        .windows(b"create virtual".len())
+                        .any(|window| window.eq_ignore_ascii_case(b"create virtual"))
+                {
+                    // a virtual table is found in the sqlite_schema, but it's no
+                    // longer in the in-memory schema. We need to recreate it if
+                    // the module is loaded in the symbol table.
+                    let vtab = if let Some(vtab) = syms.vtabs.get(name) {
+                        vtab.clone()
+                    } else {
+                        let mod_name = module_name_from_sql(sql)?;
+                        crate::VirtualTable::table(
+                            Some(name),
+                            mod_name,
+                            module_args_from_sql(sql)?,
+                            syms,
+                        )?
+                    };
+                    self.add_virtual_table(vtab)?;
+                } else {
+                    let table = dialect.parse_sql(sql, root_page)?;
 
-                        if table.has_virtual_columns && !self.generated_columns_enabled {
-                            return Err(LimboError::ParseError(format!(
+                    if table.has_virtual_columns && !self.generated_columns_enabled {
+                        return Err(LimboError::ParseError(format!(
                             "table '{}' uses generated columns but the generated_columns feature is not enabled",
                             table.name
                         )));
-                        }
+                    }
 
-                        // Detect sequence-backing tables by name prefix.
-                        // Just add the table (for B-tree access); sequences are created by
-                        // AddSequence at CREATE time or initialize_sequences at open time.
-                        if table.name.starts_with(SEQ_BACKING_TABLE_PREFIX) {
-                            self.add_btree_table(Arc::new(table))?;
-                            return Ok(());
-                        }
+                    // Detect sequence-backing tables by name prefix.
+                    // Just add the table (for B-tree access); sequences are created by
+                    // AddSequence at CREATE time or initialize_sequences at open time.
+                    if table.name.starts_with(SEQ_BACKING_TABLE_PREFIX) {
+                        self.add_btree_table(Arc::new(table))?;
+                        return Ok(());
+                    }
 
-                        // Check if this is a DBSP state table
-                        if table.name.starts_with(DBSP_TABLE_PREFIX) {
-                            // Extract version and view name from __turso_internal_dbsp_state_v<version>_<viewname>
-                            let suffix = table.name.strip_prefix(DBSP_TABLE_PREFIX).unwrap();
+                    // Check if this is a DBSP state table
+                    if table.name.starts_with(DBSP_TABLE_PREFIX) {
+                        // Extract version and view name from __turso_internal_dbsp_state_v<version>_<viewname>
+                        let suffix = table.name.strip_prefix(DBSP_TABLE_PREFIX).unwrap();
 
-                            // Parse version and view name (format: "<version>_<viewname>")
-                            if let Some(underscore_pos) = suffix.find('_') {
-                                let version_str = &suffix[..underscore_pos];
-                                let view_name = &suffix[underscore_pos + 1..];
+                        // Parse version and view name (format: "<version>_<viewname>")
+                        if let Some(underscore_pos) = suffix.find('_') {
+                            let version_str = &suffix[..underscore_pos];
+                            let view_name = &suffix[underscore_pos + 1..];
 
-                                // Check version compatibility
-                                if let Ok(stored_version) = version_str.parse::<u32>() {
-                                    if stored_version == DBSP_CIRCUIT_VERSION {
-                                        // Version matches, store the root page
-                                        dbsp_state_roots.insert(view_name.to_string(), root_page);
-                                    } else {
-                                        // Version mismatch - DO NOT insert into dbsp_state_roots
-                                        // This will cause populate_materialized_views to skip this view
-                                        tracing::warn!(
+                            // Check version compatibility
+                            if let Ok(stored_version) = version_str.parse::<u32>() {
+                                if stored_version == DBSP_CIRCUIT_VERSION {
+                                    // Version matches, store the root page
+                                    dbsp_state_roots.insert(view_name.to_string(), root_page);
+                                } else {
+                                    // Version mismatch - DO NOT insert into dbsp_state_roots
+                                    // This will cause populate_materialized_views to skip this view
+                                    tracing::warn!(
                                         "Skipping materialized view '{}' - has version {} but current version is {}. DROP and recreate the view to use it.",
                                         view_name,
                                         stored_version,
                                         DBSP_CIRCUIT_VERSION
                                     );
-                                        // We can't track incompatible views here since we're in handle_schema_row
-                                        // which doesn't have mutable access to self
-                                    }
+                                    // We can't track incompatible views here since we're in handle_schema_row
+                                    // which doesn't have mutable access to self
                                 }
                             }
                         }
-
-                        let mut table = table;
-                        table.resolve_custom_type_affinities(self);
-                        table.propagate_domain_constraints(self)?;
-                        let has_autoinc = table.has_autoincrement;
-                        let tbl_name = table.name.clone();
-                        self.add_btree_table(Arc::new(table))?;
-
-                        // Create the hidden sequence object owned by this
-                        // AUTOINCREMENT table. The `__turso_internal_autoincrement_`
-                        // prefix is a sequence namespace marker, not a table name;
-                        // the physical table is the corresponding
-                        // `__turso_internal_seq_<sequence-name>` backing table.
-                        if has_autoinc {
-                            let seq_name = autoincrement_sequence_name(&tbl_name);
-                            if let std::collections::hash_map::Entry::Vacant(e) =
-                                self.sequences.entry(normalize_ident(&seq_name))
-                            {
-                                let seq = Sequence::new(
-                                    seq_name.clone(),
-                                    Some(1),
-                                    Some(1),
-                                    None,
-                                    None,
-                                    false,
-                                )?;
-                                e.insert(Arc::new(seq));
-                            }
-                        }
                     }
-                    other => {
-                        return Err(LimboError::Corrupt(format!(
-                            "sqlite_schema table row {name} has unexpected SQL {sql:?}: parsed as {other:?}"
-                        )));
+
+                    let mut table = table;
+                    table.resolve_custom_type_affinities(self);
+                    table.propagate_domain_constraints(self)?;
+                    let has_autoinc = table.has_autoincrement;
+                    let tbl_name = table.name.clone();
+                    self.add_btree_table(Arc::new(table))?;
+
+                    // Create the hidden sequence object owned by this
+                    // AUTOINCREMENT table. The `__turso_internal_autoincrement_`
+                    // prefix is a sequence namespace marker, not a table name;
+                    // the physical table is the corresponding
+                    // `__turso_internal_seq_<sequence-name>` backing table.
+                    if has_autoinc {
+                        let seq_name = autoincrement_sequence_name(&tbl_name);
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            self.sequences.entry(normalize_ident(&seq_name))
+                        {
+                            let seq = Sequence::new(
+                                seq_name.clone(),
+                                Some(1),
+                                Some(1),
+                                None,
+                                None,
+                                false,
+                            )?;
+                            e.insert(Arc::new(seq));
+                        }
                     }
                 }
             }
@@ -2380,6 +2372,27 @@ impl Schema {
         };
 
         Ok(())
+    }
+
+    /// Get a sequence by name (case-insensitive).
+    pub fn get_sequence(&self, name: &str) -> Option<&Arc<Sequence>> {
+        self.sequences.get(&normalize_ident(name))
+    }
+
+    /// Remove a sequence and its backing table from the in-memory schema.
+    ///
+    /// The backing table lives in `self.tables` under the
+    /// `__turso_internal_seq_<name>` prefix, NOT the bare sequence name —
+    /// using the bare name here was a merge regression that left stale
+    /// entries on DROP SEQUENCE, breaking any subsequent CREATE SEQUENCE
+    /// with the same name (covered by
+    /// `tests/integration/postgres/sequence.rs::test_drop_sequence_reuse_name`
+    /// and the `drop-create-sequence-uses-new-descriptor` sqltest).
+    pub fn remove_sequence(&mut self, name: &str) {
+        let normalized = normalize_ident(name);
+        self.sequences.remove(&normalized);
+        let backing_table = crate::translate::sequence::sequence_backing_table_name(&normalized);
+        self.tables.remove(&backing_table);
     }
 
     /// Compute all resolved FKs *referencing* `table_name` (arg: `table_name` is the parent).
@@ -2576,18 +2589,6 @@ impl Schema {
             )));
         }
         Ok(())
-    }
-
-    pub fn get_sequence(&self, name: &str) -> Option<&Arc<Sequence>> {
-        self.sequences.get(&normalize_ident(name))
-    }
-
-    /// Remove a sequence and its backing table from the in-memory schema.
-    pub fn remove_sequence(&mut self, name: &str) {
-        let normalized = normalize_ident(name);
-        self.sequences.remove(&normalized);
-        let backing_table = crate::translate::sequence::sequence_backing_table_name(&normalized);
-        self.tables.remove(&backing_table);
     }
 
     /// Returns the type of schema object with the given name, if one exists.
@@ -2821,7 +2822,7 @@ impl TryClone for Schema {
             dropped_root_pages: self.dropped_root_pages.try_clone()?,
             type_registry: self.type_registry.try_clone()?,
             generated_columns_enabled: self.generated_columns_enabled,
-            sequences: self.sequences.try_clone()?,
+            sequences: self.sequences.clone(),
         })
     }
 }
@@ -3508,10 +3509,18 @@ impl BTreeTable {
         let cmd = parser.next_cmd()?;
         match cmd {
             Some(Cmd::Stmt(Stmt::CreateTable { tbl_name, body, .. })) => {
-                create_table(tbl_name.name.as_str(), &body, root_page)
+                Self::from_create_table_ast(&tbl_name, &body, root_page)
             }
             _ => unreachable!("Expected CREATE TABLE statement"),
         }
+    }
+
+    pub fn from_create_table_ast(
+        tbl_name: &turso_parser::ast::QualifiedName,
+        body: &CreateTableBody,
+        root_page: i64,
+    ) -> Result<BTreeTable> {
+        create_table(tbl_name.name.as_str(), body, root_page)
     }
 
     /// Reconstruct the SQL for the table.
@@ -6716,6 +6725,7 @@ mod tests {
             &mut HashMap::default(),
             &mut HashMap::default(),
             &|_| None,
+            &crate::dialect::SQLiteSchemaDialect,
         );
         assert!(result
             .unwrap_err()

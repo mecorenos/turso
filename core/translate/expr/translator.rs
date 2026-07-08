@@ -689,7 +689,7 @@ pub fn translate_expr(
                 Func::Window(_) => {
                     crate::bail_parse_error!("misuse of window function {}()", name.as_str())
                 }
-                Func::External(_) => {
+                Func::External(_) | Func::Dialect(_) => {
                     let regs = program.alloc_registers(args_count);
                     for (i, arg_expr) in args.iter().enumerate() {
                         translate_expr(program, referenced_tables, arg_expr, regs + i, resolver)?;
@@ -1976,7 +1976,7 @@ pub fn translate_expr(
                             target_register,
                             func_ctx,
                         ),
-                        ScalarFunc::CurrVal => translate_function(
+                        _ => translate_function(
                             program,
                             args,
                             referenced_tables,

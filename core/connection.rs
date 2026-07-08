@@ -1011,10 +1011,31 @@ impl Connection {
         self.prepare_stmt_with_origin(stmt, StatementOrigin::Root)
     }
 
+    /// Prepare a translated AST using the original SQL text for schema storage
+    /// and diagnostics.
+    #[doc(hidden)]
+    pub fn prepare_translated_stmt(
+        self: &Arc<Connection>,
+        stmt: ast::Stmt,
+        input: &str,
+    ) -> Result<Statement> {
+        self.prepare_stmt_with_input_and_origin(stmt, input, StatementOrigin::Root)
+    }
+
     #[turso_macros::trace_stack]
     fn prepare_stmt_with_origin(
         self: &Arc<Connection>,
         stmt: ast::Stmt,
+        origin: StatementOrigin,
+    ) -> Result<Statement> {
+        self.prepare_stmt_with_input_and_origin(stmt, "<ast>", origin)
+    }
+
+    #[turso_macros::trace_stack]
+    fn prepare_stmt_with_input_and_origin(
+        self: &Arc<Connection>,
+        stmt: ast::Stmt,
+        input: &str,
         origin: StatementOrigin,
     ) -> Result<Statement> {
         if self.is_closed() {
@@ -1037,7 +1058,7 @@ impl Connection {
                 self.clone(),
                 &syms,
                 mode,
-                "<ast>", // No SQL input string available
+                input,
             )?;
             Ok(Statement::new_with_origin(
                 program,
